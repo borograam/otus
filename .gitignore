@@ -3,6 +3,8 @@
 **/.idea/
 **/.DS_Store
 **/_run_files/
+**/__pycache__/
 .DS_Store
 .ipynb_checkpoints/
 .idea/
+01_advanced_basics/**/*.log

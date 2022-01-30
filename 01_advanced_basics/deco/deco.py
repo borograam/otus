@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
+import itertools
 from functools import update_wrapper
 from itertools import chain
 from copy import deepcopy
@@ -109,7 +109,11 @@ def trace(sep):
     '''
     @decorator
     def dec(func, args, kwargs, mem):
-        func_call = f'{func.__name__}({", ".join(str(a) for a in args)})'
+        func_args = ", ".join(itertools.chain(
+            (str(a) for a in args),
+            (f'{k}={v}' for k, v in kwargs.items())
+        ))
+        func_call = f'{func.__name__}({func_args})'
         print(f'{sep * mem.nested} --> {func_call}')
 
         mem.nested += 1
@@ -138,7 +142,7 @@ def bar(a, b):
 
 
 @countcalls
-@trace("####")
+@trace("    ")
 @memo
 def fib(n):
     """Some doc"""
@@ -159,6 +163,8 @@ def main():
     print(fib.__doc__)
     fib(10)
     print(fib.calls, 'calls made')
+    # 19 - т.к. счётчик стоит до мемоизации, так что вытягивание значения из кеша тоже считается.
+    # Я бы переставил memo и countcalls местами, тогда будет 11 (что соответствует идеологически и трейсу)
 
 
 if __name__ == '__main__':
