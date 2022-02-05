@@ -11,7 +11,7 @@ from decimal import Decimal as D
 import log_analyzer as la
 import logging
 import configparser
-from unittest.mock import patch, mock_open
+from unittest.mock import patch, mock_open, MagicMock
 from typing import Iterable, ContextManager, Optional, Tuple
 
 logging.getLogger('log_analyzer').setLevel(logging.CRITICAL + 1)
@@ -43,15 +43,12 @@ class TestGetArgparseArgs(unittest.TestCase):
 
 class TestReadConfigFile(unittest.TestCase):
     def test_no_file(self):
-        res = la.read_config_file('/not_exist')
-        self.assertRegex(res, r"File not found:(.*)'/not_exist'")
+        self.assertRaisesRegex(SystemExit, r'^File not found: ', la.read_config_file, '/not_exist')
 
     def test_parse_error(self):
         message = 'mes'
-        with patch('configparser.ConfigParser.read_file') as mock:
-            mock.side_effect = configparser.ParsingError(message)
-            res = la.read_config_file('tests.py')  # this file always exists
-        self.assertRegex(res, f'Parsing error:(.*){message}')
+        with patch('configparser.ConfigParser.read_file', side_effect=configparser.ParsingError(message)) as mock:
+            self.assertRaisesRegex(SystemExit, r'^Parsing error:', la.read_config_file, 'tests.py')
 
     def test_empty_file(self):
         """ensure read_config_file has no error on empty config file"""
@@ -68,66 +65,65 @@ log_dir = /here""", get_global=True)
         self.assertEqual(res['log_analyzer']['log_dir'], '/here')
 
 
-class TestValidateAndGetConfigSection(unittest.TestCase):
+class TestValidateAndGetConfig(unittest.TestCase):
     def setUp(self) -> None:
         self.global_config = create_fake_config(get_global=True)
         self.config = self.global_config[la.CONFIG_FILE_SECTION]
 
     def test_config_paths_exists(self):
-        with patch('os.path.exists', return_value=True):
+        with patch('os.path.exists', return_value=True), patch('os.path.isfile', return_value=False):
             for path in ('log_dir', 'report_dir', 'report_size', 'log_file_error_percentage'):
                 with self.subTest(path):
                     temp = self.config[path]
                     del self.config[path]
-                    self.assertIsNone(la.validate_and_get_config_section(self.global_config))
-                    self.config[path] = temp  # restore value
-
-    def test_log_dir_not_exist(self):
-        with patch('os.path.exists', return_value=False):
-            self.assertIsNone(la.validate_and_get_config_section(self.global_config))
-
-    def test_not_castable(self):
-        with patch.object(la, 'check_config_value_castable_to', return_value=False):
-            self.assertIsNone(la.validate_and_get_config_section(self.global_config))
+                    with patch.object(la, 'read_config_file', return_value=self.global_config):
+                        self.assertRaisesRegex(
+                            SystemExit,
+                            r"^missing mandatory '%s' config value$" % path,
+                            la.validate_and_get_config,
+                            '/filename'
+                        )
+                    self.config[path] = temp  # restore the value
 
 
-class TestEnsureDirFromConfigExists(unittest.TestCase):
+class TestValidateDirFromConfig(unittest.TestCase):
     def setUp(self):
         self.config = create_fake_config()
         self.config['log_dir'] = '/some'
 
     @dataclass
     class TestParam:
-        file_exists: bool
-        create_if_not: bool
-        expected_result: bool
-        mkdir_called: bool
-
-    @staticmethod
-    def generate_test_name(param: TestParam) -> str:
-        return f'{param.file_exists=}, {param.create_if_not=}'
+        path_exists: bool
+        path_is_file: bool
+        must_exist_param: bool
+        exception_regex: Optional[str]
 
     def test(self):
-        params: Tuple[TestEnsureDirFromConfigExists.TestParam, ...] = (
-            self.TestParam(True, True, True, False),
-            self.TestParam(True, False, True, False),
-            self.TestParam(False, True, True, True),
-            self.TestParam(False, False, False, False),
+        params: Tuple[TestValidateDirFromConfig.TestParam, ...] = (
+            self.TestParam(True, True, True, r'^bad "\w+" config path \(.*\), it must be a directory!$'),
+            self.TestParam(True, True, False, r'^bad "\w+" config path \(.*\), it must be a directory!$'),
+            self.TestParam(True, False, True, None),
+            self.TestParam(True, False, False, None),
+            self.TestParam(False, False, True, r'bad "\w+" config path \(.*\), directory must exist!$'),
+            self.TestParam(False, False, False, None),
         )
 
         for param in params:
-            with self.subTest(self.generate_test_name(param)):
+            with self.subTest(param):
                 with (
-                        patch('os.path.exists', return_value=param.file_exists),
-                        patch.object(la, 'Path') as m
+                        patch('os.path.exists', return_value=param.path_exists),
+                        patch('os.path.isfile', return_value=param.path_is_file)
                 ):
-                    res = la.ensure_dir_from_config_exists(self.config, 'log_dir',
-                                                           create_if_not=param.create_if_not)
-                self.assertEqual(res, param.expected_result)
-                self.assertEqual(m.called, param.mkdir_called)
+                    args = (self.config, 'log_dir', param.must_exist_param)
+                    if param.exception_regex:
+                        self.assertRaisesRegex(
+                            SystemExit, param.exception_regex,
+                            la.validate_dir_from_config, *args)
+                    else:
+                        la.validate_dir_from_config(*args)
 
 
-class TestCheckConfigValueCastableTo(unittest.TestCase):
+class TestValidateConfigValueCastableTo(unittest.TestCase):
     def setUp(self) -> None:
         self.config = create_fake_config()
 
@@ -135,10 +131,10 @@ class TestCheckConfigValueCastableTo(unittest.TestCase):
     class TestParam:
         value: str
         type_: type
-        expected: bool
+        valid: bool
 
     def test(self):
-        params: Tuple[TestCheckConfigValueCastableTo.TestParam, ...] = (
+        params: Tuple[TestValidateConfigValueCastableTo.TestParam, ...] = (
             self.TestParam('59', int, True),
             self.TestParam('23.543', float, True),
             self.TestParam('59.1', int, False),
@@ -146,8 +142,15 @@ class TestCheckConfigValueCastableTo(unittest.TestCase):
         for param in params:
             with self.subTest(param):
                 self.config['test'] = param.value
-                res = la.check_config_value_castable_to(self.config, 'test', param.type_)
-                self.assertEqual(res, param.expected)
+                args = (self.config, 'test', param.type_)
+                if not param.valid:
+                    self.assertRaisesRegex(
+                        SystemExit,
+                        r'^bad "test" config path \(%s\), expected %s$' % (param.value, param.type_),
+                        la.validate_config_value_castable_to, *args
+                    )
+                else:
+                    la.validate_config_value_castable_to(*args)
 
 
 class TestGetNewestLogFile(unittest.TestCase):
@@ -160,7 +163,7 @@ class TestGetNewestLogFile(unittest.TestCase):
         content.update({file: True for file in files})
 
         def isfile(full_path: str) -> bool:
-            return content[full_path.split('/')[-1]]  # what about windows?
+            return content[full_path.split('/')[-1]]
 
         with patch('os.listdir', return_value=content.keys()):
             with patch('os.path.isfile', side_effect=isfile):
@@ -237,18 +240,6 @@ class TestGetNewestLogFile(unittest.TestCase):
                     self.assertEqual(param.expected, res)
 
 
-class TestMakeReportFilePath(unittest.TestCase):
-    def setUp(self) -> None:
-        self.config = create_fake_config()
-        self.config['report_dir'] = '/some'
-
-        self.log_file_info = la.LogFileInfo('filename.log', datetime(2022, 1, 1), '.txt')
-
-    def test_common(self) -> None:
-        res: str = la.make_report_file_path(self.config, self.log_file_info)
-        self.assertEqual(res, '/some/report-2022.01.01.html')
-
-
 class TestReadLogFileGenerator(unittest.TestCase):
     def setUp(self) -> None:
         self.config = create_fake_config()
@@ -284,21 +275,12 @@ class TestCheckLogFileErrorPercentage(unittest.TestCase):
     def setUp(self) -> None:
         self.config = create_fake_config(log_file_error_percentage='10')
 
-    def test(self):
-        self.assertFalse(la.check_log_file_error_percentage(self.config, 10, 100))
-        self.assertTrue(la.check_log_file_error_percentage(self.config, 9, 100))
+    def test_valid(self):
+        la.check_log_file_error_percentage(self.config, 9, 100)
 
-
-class TestGetMedian(unittest.TestCase):
-    def test_odd(self):
-        num_list = list(D(i) for i in range(5))
-        random.shuffle(num_list)
-        self.assertEqual(la.get_median(num_list), D(2))
-
-    def test_even(self):
-        num_list = list(D(i) for i in range(10))
-        random.shuffle(num_list)
-        self.assertEqual(la.get_median(num_list), D('4.5'))
+    def test_not_valid(self):
+        self.assertRaisesRegex(
+            SystemExit, r'^a lot of error lines', la.check_log_file_error_percentage, self.config, 1, 10)
 
 
 class TestCalculateReport(unittest.TestCase):
@@ -314,11 +296,11 @@ class TestCalculateReport(unittest.TestCase):
             ('/bbb', D(4)),
             ('/ccc', D(5)),
         )
-        with (
-                patch.object(la, 'read_log_file_generator', return_value=range(len(fake_data))),
-                patch.object(la, 'parse_nginx_line', side_effect=fake_data)
-        ):
-            res = la.calculate_report(self.config, self.log_file_info)
+
+        log_rows = range(len(fake_data))
+        parse_log_row = MagicMock(side_effect=fake_data)
+        res = la.calculate_report(self.config, log_rows, parse_log_row)
+
         self.assertEqual(res, [
             la.create_report_dict('/bbb', D(7), D(15), [D(3), D(4)], 5),
             la.create_report_dict('/ccc', D(5), D(15), [D(5)], 5),
