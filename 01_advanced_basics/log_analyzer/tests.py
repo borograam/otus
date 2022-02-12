@@ -43,12 +43,12 @@ class TestGetArgparseArgs(unittest.TestCase):
 
 class TestReadConfigFile(unittest.TestCase):
     def test_no_file(self):
-        self.assertRaisesRegex(SystemExit, r'^File not found: ', la.read_config_file, '/not_exist')
+        self.assertRaisesRegex(la.ConfigurationError, r'^File not found: ', la.read_config_file, '/not_exist')
 
     def test_parse_error(self):
         message = 'mes'
         with patch('configparser.ConfigParser.read_file', side_effect=configparser.ParsingError(message)) as mock:
-            self.assertRaisesRegex(SystemExit, r'^Parsing error:', la.read_config_file, 'tests.py')
+            self.assertRaisesRegex(la.ConfigurationError, r'^Parsing error:', la.read_config_file, 'tests.py')
 
     def test_empty_file(self):
         """ensure read_config_file has no error on empty config file"""
@@ -78,7 +78,7 @@ class TestValidateAndGetConfig(unittest.TestCase):
                     del self.config[path]
                     with patch.object(la, 'read_config_file', return_value=self.global_config):
                         self.assertRaisesRegex(
-                            SystemExit,
+                            la.ConfigurationError,
                             r"^missing mandatory '%s' config value$" % path,
                             la.validate_and_get_config,
                             '/filename'
@@ -117,7 +117,7 @@ class TestValidateDirFromConfig(unittest.TestCase):
                     args = (self.config, 'log_dir', param.must_exist_param)
                     if param.exception_regex:
                         self.assertRaisesRegex(
-                            SystemExit, param.exception_regex,
+                            la.ConfigurationError, param.exception_regex,
                             la.validate_dir_from_config, *args)
                     else:
                         la.validate_dir_from_config(*args)
@@ -145,7 +145,7 @@ class TestValidateConfigValueCastableTo(unittest.TestCase):
                 args = (self.config, 'test', param.type_)
                 if not param.valid:
                     self.assertRaisesRegex(
-                        SystemExit,
+                        la.ConfigurationError,
                         r'^bad "test" config path \(%s\), expected %s$' % (param.value, param.type_),
                         la.validate_config_value_castable_to, *args
                     )
@@ -280,7 +280,7 @@ class TestCheckLogFileErrorPercentage(unittest.TestCase):
 
     def test_not_valid(self):
         self.assertRaisesRegex(
-            SystemExit, r'^a lot of error lines', la.check_log_file_error_percentage, self.config, 1, 10)
+            RuntimeError, r'^a lot of error lines', la.check_log_file_error_percentage, self.config, 1, 10)
 
 
 class TestCalculateReport(unittest.TestCase):

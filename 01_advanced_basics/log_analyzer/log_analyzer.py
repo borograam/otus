@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from statistics import median
 from typing import Union, Optional, Iterator, Iterable, Callable
-from decimal import Decimal as D
+from decimal import Decimal
 
 ConfigOrError = Union[configparser.ConfigParser, str]
 ConfigSec = configparser.SectionProxy
@@ -48,6 +48,10 @@ def get_argparse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+class ConfigurationError(RuntimeError):
+    pass
+
+
 def read_config_file(filename: str) -> configparser.ConfigParser:
     """returns config from file or throw an error"""
     config_file = configparser.ConfigParser(
@@ -58,9 +62,9 @@ def read_config_file(filename: str) -> configparser.ConfigParser:
             config_file.read_file(fp)
             return config_file
     except configparser.ParsingError as e:
-        raise SystemExit(f'Parsing error: {str(e)}')
+        raise ConfigurationError(f'Parsing error: {e}') from e
     except FileNotFoundError as e:
-        raise SystemExit(f'File not found: {str(e)}')
+        raise ConfigurationError(f'File not found: {e}') from e
 
 
 def validate_and_get_config(filename: str) -> ConfigSec:
@@ -73,7 +77,7 @@ def validate_and_get_config(filename: str) -> ConfigSec:
         validate_config_value_castable_to(config, 'report_size', int)
         validate_config_value_castable_to(config, 'log_file_error_percentage', float)
     except KeyError as e:
-        raise SystemExit('missing mandatory %s config value' % e)
+        raise ConfigurationError(f'missing mandatory {e} config value') from e
     return config
 
 
@@ -84,17 +88,17 @@ def validate_dir_from_config(config: ConfigSec, config_path: str, must_exist: bo
     logger.info('directory %s %sexist', dir_name, '' if exists else 'does not ')
     if exists:
         if os.path.isfile(dir_name):
-            raise SystemExit('bad "%s" config path (%s), it must be a directory!' % (config_path, dir_name))
+            raise ConfigurationError(f'bad "{config_path}" config path ({dir_name}), it must be a directory!')
     elif must_exist:
-        raise SystemExit('bad "%s" config path (%s), directory must exist!' % (config_path, dir_name))
+        raise ConfigurationError(f'bad "{config_path}" config path ({dir_name}), directory must exist!')
 
 
 def validate_config_value_castable_to(config: ConfigSec, config_path: str, type_: type) -> None:
     value = config[config_path]
     try:
         type_(value)
-    except ValueError:
-        raise SystemExit('bad "%s" config path (%s), expected %s' % (config_path, value, type_))
+    except ValueError as e:
+        raise ConfigurationError(f'bad "{config_path}" config path ({value}), expected {type_}') from e
 
 
 def configure_logging(config: ConfigSec):
@@ -102,13 +106,6 @@ def configure_logging(config: ConfigSec):
                         format='[%(asctime)s] %(levelname).1s %(message)s',
                         datefmt='%Y.%m.%d %H:%M:%S',
                         level=logging.INFO)
-
-
-def create_report_dir(config: ConfigSec):
-    try:
-        Path(config['report_dir']).mkdir(parents=True)
-    except FileExistsError:
-        pass
 
 
 @dataclass
@@ -145,10 +142,10 @@ def read_log_file_generator(log_file_info: LogFileInfo, encoding='utf-8') -> Ite
     logger.info('log file %s was closed', log_file_info.filename)
 
 
-def parse_nginx_line(line: str) -> tuple[str, D]:
+def parse_nginx_line(line: str) -> tuple[str, Decimal]:
     # не стал создавать датакласс для результов этой функции, чтобы не плодить лишних объектов
     m = nginx_line_re.match(line)
-    return m.group('url'), D(m.group('time'))  # throws AttributeError
+    return m.group('url'), Decimal(m.group('time'))  # throws AttributeError
 
 
 def check_log_file_error_percentage(config: ConfigSec, error_number: int, line_number: int) -> None:
@@ -156,13 +153,13 @@ def check_log_file_error_percentage(config: ConfigSec, error_number: int, line_n
     percentage = error_number / line_number * 100
     logger.info('calculate error percentage: %d of %d (%.2f%%)', error_number, line_number, percentage)
     if percentage >= config_level:
-        raise SystemExit('a lot of error lines: %.2f%% allowed, actual %.2f%%' % (config_level, percentage))
+        raise RuntimeError('a lot of error lines: %.2f%% allowed, actual %.2f%%' % (config_level, percentage))
 
 
 def calculate_report(config: ConfigSec,
                      log_rows: Iterable[str],
-                     parse_log_row: Callable[[str], tuple[str, D]]) -> list[dict]:
-    memory: dict[str, list[D]] = defaultdict(list)
+                     parse_log_row: Callable[[str], tuple[str, Decimal]]) -> list[dict]:
+    memory: dict[str, list[Decimal]] = defaultdict(list)
     error_number = line_number = 0
     logger.info('start to read the log')
     for line in log_rows:
@@ -189,7 +186,8 @@ def calculate_report(config: ConfigSec,
     ]
 
 
-def create_report_dict(url: str, url_time_sum: D, all_time_sum: D, time_list: list[D], all_count: int):
+def create_report_dict(
+        url: str, url_time_sum: Decimal, all_time_sum: Decimal, time_list: list[Decimal], all_count: int):
     url_count: int = len(time_list)
     return {
         "count": url_count,
@@ -231,14 +229,16 @@ def main() -> Optional[int]:
     if not report:
         return
 
-    create_report_dir(config)
+    if not os.path.exists(config['report_dir']):
+        Path(config['report_dir']).mkdir(parents=True)
+
     save_report(report, report_file_path)
 
 
 if __name__ == "__main__":
     try:
         main()
+    except RuntimeError as e:  # ожидаемая ситуация, при которой что-то пошло не так
+        logger.error(e)
     except (Exception, KeyboardInterrupt) as e:  # неожиданная ситуация
         logger.exception(e)
-    except SystemExit as e:  # ожидаемая ситуация, при которой что-то пошло не так
-        logger.error(e)
