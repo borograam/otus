@@ -6,7 +6,6 @@ from functools import cached_property
 
 from typing import Any, TypeVar
 
-import abc
 import json
 import datetime
 import logging
@@ -48,7 +47,7 @@ class ValidationError(Exception):
     pass
 
 
-class BaseField(ABC):  # todo: abc
+class BaseField(ABC):
     def __init__(self, required: bool = True, nullable: bool = False) -> None:
         self.required = required
         self.nullable = nullable
@@ -147,7 +146,7 @@ class RequestMeta(ABCMeta):
                 value.set_label(attr)
 
 
-class BaseRequest(metaclass=RequestMeta):  # todo: abc
+class BaseRequest(metaclass=RequestMeta):
     def __init__(self, **kwargs):
         super().__init__()
         for attr, value in kwargs.items():
