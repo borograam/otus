@@ -1,4 +1,3 @@
-import random
 from dataclasses import dataclass
 
 from datetime import datetime
@@ -6,7 +5,6 @@ from datetime import datetime
 from contextlib import contextmanager
 
 import unittest
-from decimal import Decimal as D
 
 import log_analyzer as la
 import logging
@@ -268,7 +266,7 @@ class TestParseNginxLine(unittest.TestCase):
     def test(self):
         line = '1.196.116.32 -  - [29/Jun/2017:03:50:22 +0300] "GET /api/v2/banner/25019354 HTTP/1.1" 200 927 "-" "Lynx/2.8.8dev.9 libwww-FM/2.14 SSL-MM/1.4.1 GNUTLS/2.10.5" "-" "1498697422-2190034393-4708-9752759" "dc7161be3" 0.390\n'
         res = la.parse_nginx_line(line)
-        self.assertEqual(res, ('/api/v2/banner/25019354', D('0.390')))
+        self.assertEqual(res, ('/api/v2/banner/25019354', 0.39))
 
 
 class TestCheckLogFileErrorPercentage(unittest.TestCase):
@@ -290,11 +288,11 @@ class TestCalculateReport(unittest.TestCase):
 
     def test_logic(self):
         fake_data = (
-            ('/aaa', D(1)),
-            ('/aaa', D(2)),
-            ('/bbb', D(3)),
-            ('/bbb', D(4)),
-            ('/ccc', D(5)),
+            ('/aaa', 1),
+            ('/aaa', 2),
+            ('/bbb', 3),
+            ('/bbb', 4),
+            ('/ccc', 5),
         )
 
         log_rows = range(len(fake_data))
@@ -302,14 +300,14 @@ class TestCalculateReport(unittest.TestCase):
         res = la.calculate_report(self.config, log_rows, parse_log_row)
 
         self.assertEqual(res, [
-            la.create_report_dict('/bbb', D(7), D(15), [D(3), D(4)], 5),
-            la.create_report_dict('/ccc', D(5), D(15), [D(5)], 5),
+            la.create_report_dict('/bbb', 7, 15, [3, 4], 5),
+            la.create_report_dict('/ccc', 5, 15, [5], 5),
         ])
 
 
 class TestCreateReportDict(unittest.TestCase):
     def test(self):
-        res = la.create_report_dict('/test', D(9), D(12), [D(1), D(2), D(6)], 12)
+        res = la.create_report_dict('/test', 9, 12, [1, 2, 6], 12)
         self.assertEqual(res, {
             'count': 3,
             'time_avg': 3.0,

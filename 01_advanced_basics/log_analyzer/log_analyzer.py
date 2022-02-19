@@ -21,12 +21,11 @@ import configparser
 import logging
 import string
 import json
+from numbers import Number
 from pathlib import Path
 from statistics import median
 from typing import Union, Optional, Iterator, Iterable, Callable
-from decimal import Decimal
 
-ConfigOrError = Union[configparser.ConfigParser, str]
 ConfigSec = configparser.SectionProxy
 
 DEFAULT_CONFIG = {
@@ -39,7 +38,7 @@ DEFAULT_CONFIG = {
 CONFIG_FILE_SECTION = 'log_analyzer'
 logger = logging.getLogger(__name__)
 
-nginx_line_re = re.compile(r"""^\S+\s+\S+\s+\S+\s+\[.*]\s+\S+\s+(?P<url>\S+).*\s+(?P<time>\d+(?:\.\d+)?)$""")
+NGINX_LINE_RE = re.compile(r"""^\S+\s+\S+\s+\S+\s+\[.*]\s+\S+\s+(?P<url>\S+).*\s+(?P<time>\d+(?:\.\d+)?)$""")
 
 
 def get_argparse_args() -> argparse.Namespace:
@@ -48,7 +47,7 @@ def get_argparse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-class ConfigurationError(RuntimeError):
+class ConfigurationError(Exception):
     pass
 
 
@@ -101,13 +100,6 @@ def validate_config_value_castable_to(config: ConfigSec, config_path: str, type_
         raise ConfigurationError(f'bad "{config_path}" config path ({value}), expected {type_}') from e
 
 
-def configure_logging(config: ConfigSec):
-    logging.basicConfig(filename=config.get('log_filename'),
-                        format='[%(asctime)s] %(levelname).1s %(message)s',
-                        datefmt='%Y.%m.%d %H:%M:%S',
-                        level=logging.INFO)
-
-
 @dataclass
 class LogFileInfo:
     filename: str
@@ -142,10 +134,10 @@ def read_log_file_generator(log_file_info: LogFileInfo, encoding='utf-8') -> Ite
     logger.info('log file %s was closed', log_file_info.filename)
 
 
-def parse_nginx_line(line: str) -> tuple[str, Decimal]:
+def parse_nginx_line(line: str) -> Optional[tuple[str, Number]]:
     # не стал создавать датакласс для результов этой функции, чтобы не плодить лишних объектов
-    m = nginx_line_re.match(line)
-    return m.group('url'), Decimal(m.group('time'))  # throws AttributeError
+    if m := NGINX_LINE_RE.match(line):
+        return m.group('url'), float(m.group('time'))
 
 
 def check_log_file_error_percentage(config: ConfigSec, error_number: int, line_number: int) -> None:
@@ -158,16 +150,17 @@ def check_log_file_error_percentage(config: ConfigSec, error_number: int, line_n
 
 def calculate_report(config: ConfigSec,
                      log_rows: Iterable[str],
-                     parse_log_row: Callable[[str], tuple[str, Decimal]]) -> list[dict]:
-    memory: dict[str, list[Decimal]] = defaultdict(list)
+                     parse_log_row: Callable[[str], Optional[tuple[str, Number]]]) -> list[dict]:
+    memory: dict[str, list[Number]] = defaultdict(list)
     error_number = line_number = 0
     logger.info('start to read the log')
     for line in log_rows:
-        try:
-            url, time = parse_log_row(line)
+        if parsed := parse_log_row(line):
+            url, time = parsed
             memory[url].append(time)  # O(1)
-        except AttributeError:
+        else:
             error_number += 1
+
         line_number += 1
     logger.info('stop to read the log')
 
@@ -187,7 +180,7 @@ def calculate_report(config: ConfigSec,
 
 
 def create_report_dict(
-        url: str, url_time_sum: Decimal, all_time_sum: Decimal, time_list: list[Decimal], all_count: int):
+        url: str, url_time_sum: Number, all_time_sum: Number, time_list: list[Number], all_count: int):
     url_count: int = len(time_list)
     return {
         "count": url_count,
@@ -213,7 +206,10 @@ def save_report(report: list[dict], report_file_path: str) -> None:
 def main() -> Optional[int]:
     args: argparse.Namespace = get_argparse_args()
     config: ConfigSec = validate_and_get_config(args.config)
-    configure_logging(config)
+    logging.basicConfig(filename=config.get('log_filename'),
+                        format='[%(asctime)s] %(levelname).1s %(message)s',
+                        datefmt='%Y.%m.%d %H:%M:%S',
+                        level=logging.INFO)
 
     log_file_info: LogFileInfo = get_newest_log_file(config)
     if log_file_info is None:
@@ -238,7 +234,7 @@ def main() -> Optional[int]:
 if __name__ == "__main__":
     try:
         main()
-    except RuntimeError as e:  # ожидаемая ситуация, при которой что-то пошло не так
+    except (ConfigurationError, RuntimeError) as e:  # ожидаемая ситуация, при которой что-то пошло не так
         logger.error(e)
     except (Exception, KeyboardInterrupt) as e:  # неожиданная ситуация
         logger.exception(e)
