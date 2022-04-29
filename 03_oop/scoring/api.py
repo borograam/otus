@@ -1,18 +1,14 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-from abc import ABC, ABCMeta, abstractmethod
-
-from functools import cached_property
-
-from typing import Any, TypeVar
-
-import json
-import datetime
-import logging
-import hashlib
-import uuid
 import argparse
+import datetime
+import hashlib
+import json
+import logging
+import uuid
+from abc import ABC
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Any, TypeVar, Union, Callable
+
 from scoring import get_score, get_interests
 
 SALT = "Otus"
@@ -51,64 +47,66 @@ class BaseField(ABC):
     def __init__(self, required: bool = True, nullable: bool = False) -> None:
         self.required = required
         self.nullable = nullable
-        self.label = None
 
-    def set_label(self, label: str) -> None:
-        self.label = label
+    def __set_name__(self, owner, name):
+        self.label = name
 
     def __get__(self, instance, owner):
-        assert self.label, 'not properly configured'
         return instance.__dict__.get(self.label)
 
     def __set__(self, instance, value):
-        assert self.label, 'not properly configured'
-        if value:
+        if value is not None:
             value = self.validate_and_clear(value)
-        if not value and not self.nullable:
+        if value is None and not self.nullable:
             raise ValidationError(f'can not set nullable value to {instance.__class__.__name__}.{self.label}')
         instance.__dict__[self.label] = value
 
-    @abstractmethod
+    allowed_types = ()
+
     def validate_and_clear(self, value: T) -> T:
+        if not isinstance(value, self.allowed_types):
+            self._raise(f'value must be {" or ".join(t.__name__ for t in self.allowed_types)}')
         return value
 
-    def assert_equal(self, value1, value2, message):
-        if value1 != value2:
-            raise ValidationError(f'{self.__class__.__name__} {message}')
+    def _raise(self, message: str) -> None:
+        raise ValidationError(f'{self.__class__.__name__} {message}')
 
 
 class CharField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value), str, 'value must be a str')
-        return value
+    allowed_types = (str,)
 
 
 class ArgumentsField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value), dict, 'value must be a dict')
-        return value
+    allowed_types = (dict,)
 
 
 class EmailField(CharField):
-    def validate_and_clear(self, value: T) -> T:
-        super().validate_and_clear(value)
-        self.assert_equal('@' in value, True, 'value must contains "@"')
+    def validate_and_clear(self, value: str) -> str:
+        value = super().validate_and_clear(value)
+        if '@' not in value:
+            self._raise('value must contains "@"')
         return value
 
 
 class PhoneField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value) in (str, int), True, 'value must be str or int')
-        value = str(value)
-        self.assert_equal(value.isnumeric(), True, 'value must contains digits only')
-        self.assert_equal(len(value), 11, 'value must contains 11 digits')
-        self.assert_equal(value[0], '7', 'value must starts with "7"')
+    allowed_types = (str, int)
+
+    def validate_and_clear(self, value: Union[str, int]) -> str:
+        value: str = str(super().validate_and_clear(value))
+        if not value.isnumeric():
+            self._raise('value must contains digits only')
+        if len(value) != 11:
+            self._raise('value must contains 11 digits')
+        if value[0] != '7':
+            self._raise('value must starts with "7"')
         return value
 
 
 class DateField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value), str, 'value must be a str')
+    allowed_types = (str,)
+
+    def validate_and_clear(self, value: str) -> datetime.datetime:
+        value = super().validate_and_clear(value)
         try:
             return datetime.datetime.strptime(value, '%d.%m.%Y')
         except ValueError as e:
@@ -116,50 +114,52 @@ class DateField(BaseField):
 
 
 class BirthDayField(DateField):
-    def validate_and_clear(self, value: T) -> T:
+    def validate_and_clear(self, value: str) -> datetime.datetime:
         dt = super().validate_and_clear(value)
         now = datetime.datetime.now()
-        self.assert_equal(
-            (now.replace(year=now.year - 70) - dt).days > 0, False, 'value must not to be older then 70 years')
+        if (now.replace(year=now.year - 70) - dt).days > 0:
+            self._raise('value must not to be older then 70 years')
         return dt
 
 
 class GenderField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value), int, 'value must be an int')
-        self.assert_equal(value in GENDERS.keys(), True, 'value must be 0, 1 or 2')
+    allowed_types = (int,)
+
+    def validate_and_clear(self, value: int) -> int:
+        value = super().validate_and_clear(value)
+        if value not in GENDERS.keys():
+            self._raise('value must be 0, 1 or 2')
         return value
 
 
 class ClientIDsField(BaseField):
-    def validate_and_clear(self, value: T) -> T:
-        self.assert_equal(type(value), list, 'value must be a list')
-        self.assert_equal(all(isinstance(val, int) for val in value), True, 'all the values in the list must be ints')
+    allowed_types = (list,)
+
+    def validate_and_clear(self, value: list[int]) -> list[int]:
+        value = super().validate_and_clear(value)
+        if not all(isinstance(val, int) for val in value):
+            self._raise('all the values in the list must be ints')
+        if not value:
+            self._raise('empty list')
         return value
 
 
-class RequestMeta(ABCMeta):
-    def __init__(cls, name, bases, namespace):
-        super().__init__(name, bases, namespace)
-        for attr, value in namespace.items():
-            if isinstance(value, BaseField):
-                value.set_label(attr)
-
-
-class BaseRequest(metaclass=RequestMeta):
+class BaseRequest(ABC):
     def __init__(self, **kwargs):
-        super().__init__()
-        for attr, value in kwargs.items():
-            setattr(self, attr, value)
-        self.validate()
+        self._kwargs = kwargs
+        self._validated = False
 
     def validate(self):
+        for attr, value in self._kwargs.items():
+            setattr(self, attr, value)  # тут происходит валидация полей
+
         for attr, field in self.all_fields().items():
             if field.required and getattr(self, attr) is None:
                 raise ValidationError(f'attribute {attr} is required in {self.__class__.__name__}')
+        self._validated = True
 
     def __setattr__(self, key: str, value: Any):
-        if not hasattr(self, key):
+        if not hasattr(self, key) and not key.startswith('_'):
             raise KeyError(f'no "{key}" attribute in {self.__class__.__name__}')
         super().__setattr__(key, value)
 
@@ -169,30 +169,19 @@ class BaseRequest(metaclass=RequestMeta):
                 for name, descriptor in cls.__dict__.items()
                 if isinstance(descriptor, BaseField)}
 
-    @abstractmethod
-    def run(self, request, ctx, store):
-        raise NotImplementedError
-
 
 class ClientsInterestsRequest(BaseRequest):
     client_ids = ClientIDsField(required=True)
-    date = DateField(required=False, nullable=True)
-
-    def run(self, request, ctx, store):
-        ctx['nclients'] = len(self.client_ids)
-        return {
-            str(client): get_interests(store, client)
-            for client in self.client_ids
-        }
+    date = DateField(required=False)
 
 
 class OnlineScoreRequest(BaseRequest):
-    first_name = CharField(required=False, nullable=True)
-    last_name = CharField(required=False, nullable=True)
-    email = EmailField(required=False, nullable=True)
-    phone = PhoneField(required=False, nullable=True)
-    birthday = BirthDayField(required=False, nullable=True)
-    gender = GenderField(required=False, nullable=True)
+    first_name = CharField(required=False)
+    last_name = CharField(required=False)
+    email = EmailField(required=False)
+    phone = PhoneField(required=False)
+    birthday = BirthDayField(required=False)
+    gender = GenderField(required=False)
 
     _must_exist_the_same_time = (
         ('phone', 'email'),
@@ -213,19 +202,9 @@ class OnlineScoreRequest(BaseRequest):
             raise ValidationError(f"{' or '.join(','.join(fields) for fields in self._must_exist_the_same_time)} "
                                   f"must be filled at th same time")
 
-    def run(self, request, ctx, store):
-        ctx['has'] = [name for name in self.all_fields().keys() if getattr(self, name) is not None]
-        if not request['method_request'].is_admin:
-            score = get_score(
-                store, self.phone, self.phone, self.birthday, self.gender, self.first_name, self.last_name)
-        else:
-            score = 42
-
-        return {'score': score}
-
 
 class MethodRequest(BaseRequest):
-    account = CharField(required=False, nullable=True)
+    account = CharField(required=False)
     login = CharField(required=True, nullable=True)
     token = CharField(required=True, nullable=True)
     arguments = ArgumentsField(required=True, nullable=True)
@@ -235,20 +214,66 @@ class MethodRequest(BaseRequest):
     def is_admin(self):
         return self.login == ADMIN_LOGIN
 
-    _method_request_map = {
+
+class Runner:
+    handlers: dict[type, Callable] = {}
+
+    @classmethod
+    def register(cls, request_type: type) -> Callable[[Callable], Callable]:
+        def deco(func: Callable) -> Callable:
+            if request_type in cls.handlers:
+                raise KeyError(f'{request_type} already registered in Runner before!')
+            cls.handlers[request_type] = func
+            return func
+
+        return deco
+
+    def __init__(self, request: BaseRequest):
+        self.request = request
+
+    def run(self, http_request: dict, ctx: dict, store: Any):
+        request_class = self.request.__class__
+        if request_class not in self.handlers:
+            raise KeyError(f'{request_class.__name__} did not registered in Runner')
+        return self.handlers[request_class](self.request, http_request, ctx, store)
+
+
+@Runner.register(MethodRequest)
+def method_request_runner(request: MethodRequest, http_request: dict, ctx: dict, store: Any):
+    method_request_map = {
         'online_score': OnlineScoreRequest,
         'clients_interests': ClientsInterestsRequest,
     }
+    try:
+        inner_request: BaseRequest = method_request_map[request.method](**request.arguments)
+    except KeyError as e:
+        raise KeyError(f'no "{request.method}" method registered in method_request_runner map') from e
 
-    @cached_property
-    def request_for_method(self) -> BaseRequest:
-        try:
-            return self._method_request_map[self.method](**self.arguments)
-        except KeyError as e:
-            raise KeyError(f'no "{self.method}" method registered in MethodRequest map') from e
+    inner_request.validate()
 
-    def run(self, request, ctx, store):
-        return self.request_for_method.run(request, ctx, store)
+    return Runner(inner_request).run(http_request, ctx, store)
+
+
+@Runner.register(OnlineScoreRequest)
+def online_score_request_runner(request: OnlineScoreRequest, http_request: dict, ctx: dict, store: Any):
+    ctx['has'] = [name for name in request.all_fields().keys() if getattr(request, name) is not None]
+    if not http_request['method_request'].is_admin:
+        score = get_score(
+            store, request.phone, request.phone, request.birthday, request.gender, request.first_name,
+            request.last_name)
+    else:
+        score = 42
+
+    return {'score': score}
+
+
+@Runner.register(ClientsInterestsRequest)
+def clients_interests_request_runner(request: ClientsInterestsRequest, http_request: dict, ctx: dict, store: Any):
+    ctx['nclients'] = len(request.client_ids)
+    return {
+        str(client): get_interests(store, client)
+        for client in request.client_ids
+    }
 
 
 def check_auth(request: MethodRequest):
@@ -262,16 +287,18 @@ def check_auth(request: MethodRequest):
     return False
 
 
-def method_handler(request, ctx, store):
+def method_handler(request: dict, ctx: dict, store: Any):
     response, code = None, None
     try:
         method_request = MethodRequest(**request['body'])
         request['method_request'] = method_request
 
+        method_request.validate()
+
         if not check_auth(method_request):
             return None, FORBIDDEN
 
-        code, response = 200, method_request.run(request, ctx, store)
+        code, response = 200, Runner(method_request).run(request, ctx, store)
     except ValidationError as e:
         return str(e), INVALID_REQUEST
     return response, code
